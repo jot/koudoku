@@ -7,6 +7,9 @@ module Koudoku::Subscription
     # client-side after storing the credit card information.
     attr_accessor :credit_card_token
 
+    # Provided by Quaderno, must be decoded to get customer ID.
+    attr_accessor :details
+
     belongs_to :plan
 
     # update details.
@@ -34,7 +37,17 @@ module Koudoku::Subscription
             prepare_for_upgrade if upgrading?
 
             # update the package level with stripe.
-            customer.update_subscription(:plan => self.plan.stripe_id, :prorate => Koudoku.prorate)
+
+            if downgrading?
+              proration_date = customer.subscriptions.first.current_period_end
+              customer.update_subscription(:plan => self.plan.stripe_id, :prorate => true, :proration_date=>proration_date)
+            elsif upgrading?
+              current_subscription = customer.subscriptions.first
+              proration_date = current_subscription.current_period_start + 1.hour
+              tax_percent = current_subscription.tax_percent
+              customer.update_subscription(:plan => self.plan.stripe_id, :prorate => true, :proration_date=>proration_date)             
+              Stripe::Invoice.create(:customer=>customer.id, :tax_percent=>tax_percent)
+            end
 
             finalize_downgrade! if downgrading?
             finalize_upgrade! if upgrading?
@@ -56,8 +69,28 @@ module Koudoku::Subscription
 
         # when customer DOES NOT exist in stripe ..
         else
+
+          if self.details.present? && self.plan.present?
+
+            # Record the new plan pricing.
+            self.current_price = self.plan.price
+
+            prepare_for_new_subscription
+            prepare_for_upgrade
+
+            
+            customer = Stripe::Customer.retrieve(decoded_details["customer"])
+
+            finalize_new_customer!(customer.id, plan.price)
+
+            self.stripe_id = customer.id
+            self.last_four = customer.cards.retrieve(customer.default_card).last4
+
+            finalize_new_subscription!
+            finalize_upgrade!
+
           # if a new plan has been selected
-          if self.plan.present?
+          elsif self.plan.present?
 
             # Record the new plan pricing.
             self.current_price = self.plan.price
@@ -155,6 +188,12 @@ module Koudoku::Subscription
       end
     end
   end
+
+
+  def decoded_details
+    JWT.decode(details, ENV['QUADERNO_SECRET_KEY'])[0] unless details.nil?
+  end
+
 
   # Set a Stripe coupon code that will be used when a new Stripe customer (a.k.a. Koudoku subscription)
   # is created
