@@ -46,7 +46,12 @@ module Koudoku::Subscription
               proration_date = current_subscription.current_period_start + 1.hour
               tax_percent = current_subscription.tax_percent
               customer.update_subscription(:plan => self.plan.stripe_id, :prorate => true, :proration_date=>proration_date)             
-              Stripe::Invoice.create(:customer=>customer.id, :tax_percent=>tax_percent)
+              begin
+                Stripe::Invoice.create(:customer=>customer.id, :tax_percent=>tax_percent)
+              rescue Stripe::InvalidRequestError => e
+              end
+            else
+              customer.update_subscription(:plan => self.plan.stripe_id, :prorate => true)              
             end
 
             finalize_downgrade! if downgrading?
@@ -228,11 +233,11 @@ module Koudoku::Subscription
   end
 
   def downgrading?
-    plan.present? and plan_id_was.present? and plan_id_was > self.plan_id
+    plan.present? and plan_id_was.present? and Plan.find(plan_id_was).price > Plan.find(self.plan_id).price
   end
 
   def upgrading?
-    (plan_id_was.present? and plan_id_was < plan_id) or plan_id_was.nil?
+    plan.present? and plan_id_was.present? and Plan.find(plan_id_was).price < Plan.find(self.plan_id).price
   end
 
   # Template methods.
